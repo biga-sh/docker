@@ -1,0 +1,9 @@
+# Local configuration and secrets
+.env
+*.crt
+backups/
+
+# AI skills (installed per machine)
+skills-lock.json
+.agents/
+.claude

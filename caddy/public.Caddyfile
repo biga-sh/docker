@@ -1,0 +1,13 @@
+# Public mode: a domain name that resolves to this machine from the
+# internet (A and/or AAAA records). Caddy gets and renews a certificate from
+# Let's Encrypt on its own; ports 80 and 443 must be reachable.
+{
+	servers {
+		trusted_proxies static {$BIGA_UPSTREAM_PROXIES}
+	}
+}
+
+{$BIGA_DOMAIN} {
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	import routes.caddy
+}

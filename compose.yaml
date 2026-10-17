@@ -1,0 +1,114 @@
+# biga on your own machine or network: the site and viewer, the API server,
+# Postgres, and Caddy in front of them. Run ./scripts/setup.sh first; it
+# writes the .env this file reads. Networking guide: docs/networking.md.
+name: biga
+
+x-hardened: &hardened
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  read_only: true
+  logging:
+    driver: local
+    options: { max-size: "10m", max-file: "5" }
+
+services:
+  # The only service with published ports. It terminates TLS and routes
+  # /api/sessions/* to the server and everything else to the site.
+  caddy:
+    <<: *hardened
+    image: caddy:2-alpine
+    cap_add: [NET_BIND_SERVICE]
+    command: ["caddy", "run", "--config", "/etc/caddy/${BIGA_PROXY_MODE:-public}.Caddyfile", "--adapter", "caddyfile"]
+    environment:
+      BIGA_DOMAIN: ${BIGA_DOMAIN:?run ./scripts/setup.sh, or set BIGA_DOMAIN in .env}
+      # Proxies in front of Caddy (a load balancer, Cloudflare) whose
+      # X-Forwarded-For to believe. Nothing by default.
+      BIGA_UPSTREAM_PROXIES: ${BIGA_UPSTREAM_PROXIES:-127.0.0.1/32}
+    ports:
+      # Empty BIGA_BIND_ADDRESS listens on every interface, IPv4 and IPv6.
+      # Set it to one address (10.0.0.5, or [fd00::5] for IPv6) to listen
+      # on one network only.
+      - "${BIGA_BIND_ADDRESS:-}${BIGA_BIND_ADDRESS:+:}${BIGA_HTTP_PORT:-80}:80/tcp"
+      - "${BIGA_BIND_ADDRESS:-}${BIGA_BIND_ADDRESS:+:}${BIGA_HTTPS_PORT:-443}:443/tcp"
+      - "${BIGA_BIND_ADDRESS:-}${BIGA_BIND_ADDRESS:+:}${BIGA_HTTPS_PORT:-443}:443/udp" # HTTP/3
+    volumes:
+      - ./caddy:/etc/caddy:ro
+      - caddy-data:/data # certificates, and the local CA in internal mode
+      - caddy-config:/config
+    tmpfs: [/tmp]
+    networks: [edge]
+    depends_on:
+      server: { condition: service_healthy }
+      web: { condition: service_healthy }
+
+  # The Go API server: sessions, uploads, live streams.
+  server:
+    <<: *hardened
+    image: ${BIGA_SERVER_IMAGE:-biga/server:local}
+    pull_policy: ${BIGA_PULL_POLICY:-never}
+    build:
+      context: ${BIGA_SERVER_SOURCE:-https://github.com/biga-sh/server.git#main}
+    environment:
+      DATABASE_URL: postgres://biga:${POSTGRES_PASSWORD:?run ./scripts/setup.sh}@postgres:5432/biga?sslmode=disable
+      BIGA_PUBLIC_URL: ${BIGA_PUBLIC_URL:?run ./scripts/setup.sh}
+      BIGA_ACCESS_KEYS: ${BIGA_ACCESS_KEYS:-}
+      # Caddy is the only peer, and it sends the real client address.
+      BIGA_TRUSTED_PROXIES: private
+      BIGA_RETENTION_DAYS: ${BIGA_RETENTION_DAYS:-30}
+      BIGA_READ_RATE_LIMIT: ${BIGA_READ_RATE_LIMIT:-3000}
+      BIGA_DEMO_SESSION_ID: ${BIGA_DEMO_SESSION_ID:-}
+      BIGA_LOG_LEVEL: ${BIGA_LOG_LEVEL:-info}
+    networks: [edge, backend]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  # The website and viewer (Next.js).
+  web:
+    <<: *hardened
+    image: ${BIGA_WEB_IMAGE:-biga/web:local}
+    pull_policy: ${BIGA_PULL_POLICY:-never}
+    build:
+      context: ${BIGA_WEB_SOURCE:-https://github.com/biga-sh/website.git#main}
+      args:
+        NEXT_PUBLIC_SITE_URL: ${BIGA_PUBLIC_URL:?run ./scripts/setup.sh}
+    environment:
+      BIGA_DEMO_SESSION_ID: ${BIGA_DEMO_SESSION_ID:-}
+    tmpfs:
+      - /tmp
+      - /app/apps/web/.next/cache:uid=1001,gid=1001
+    networks: [edge]
+
+  postgres:
+    <<: *hardened
+    image: postgres:17-alpine
+    # The entrypoint prepares the data directory as root, then drops to the
+    # postgres user; these are the capabilities that needs.
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    environment:
+      POSTGRES_USER: biga
+      POSTGRES_DB: biga
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run ./scripts/setup.sh}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    tmpfs: [/tmp, /var/run/postgresql]
+    shm_size: 256mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U biga -d biga"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [backend]
+
+networks:
+  # Caddy, the site and the server.
+  edge: {}
+  # The server and the database. Internal: no route to the outside world,
+  # and nothing on it is reachable from the host.
+  backend:
+    internal: true
+
+volumes:
+  pgdata:
+  caddy-data:
+  caddy-config:

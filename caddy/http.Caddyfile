@@ -1,0 +1,14 @@
+# HTTP mode: no TLS. For a network you fully trust, or when something else
+# in front terminates TLS (a load balancer, Cloudflare Tunnel, Tailscale
+# Serve). Owner tokens and access keys cross the network in clear text, so
+# do not use this on a network you share with people you do not trust.
+{
+	auto_https off
+	servers {
+		trusted_proxies static {$BIGA_UPSTREAM_PROXIES}
+	}
+}
+
+:80 {
+	import routes.caddy
+}

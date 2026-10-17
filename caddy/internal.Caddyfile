@@ -1,0 +1,20 @@
+# Internal mode: HTTPS on a private network (an office LAN, a VPN, a
+# homelab) with certificates from Caddy's own certificate authority. Works
+# for names (biga.lan, biga.internal) and bare IPv4 or IPv6 addresses. Each
+# device must trust the CA once: ./scripts/trust-ca.sh exports it.
+{
+	servers {
+		trusted_proxies static {$BIGA_UPSTREAM_PROXIES}
+	}
+	pki {
+		ca local {
+			name "biga local CA"
+		}
+	}
+}
+
+{$BIGA_DOMAIN} {
+	tls internal
+	header Strict-Transport-Security "max-age=31536000"
+	import routes.caddy
+}

@@ -1,0 +1,38 @@
+# Shared by every mode: imported inside the site block.
+
+# The API server. Only session routes are public; its health endpoints and
+# the cron route stay on the internal network.
+@api path /api/sessions /api/sessions/*
+handle @api {
+	request_body {
+		max_size 64MB
+	}
+	reverse_proxy {
+		# Every server replica (one unless compose.scale.yaml is used).
+		dynamic a server 8080 {
+			refresh 10s
+		}
+		lb_policy least_conn
+		lb_try_duration 5s
+		# One clean hop: the client address Caddy determined, after its own
+		# trusted_proxies. The server trusts Caddy and reads only this.
+		header_up X-Forwarded-For {client_ip}
+		# Server-sent events go out as soon as they are written.
+		flush_interval -1
+	}
+}
+
+# The site and viewer.
+handle {
+	encode zstd gzip
+	reverse_proxy web:3000 {
+		header_up X-Forwarded-For {client_ip}
+	}
+}
+
+header {
+	-Server
+	X-Content-Type-Options nosniff
+	Referrer-Policy strict-origin-when-cross-origin
+	Permissions-Policy "camera=(), microphone=(), geolocation=()"
+}
