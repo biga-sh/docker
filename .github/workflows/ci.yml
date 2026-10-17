@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1" # weekly: catch upstream image or source breakage
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Scripts
+        run: shellcheck --shell=sh scripts/*.sh
+
+      - name: Compose files, every combination
+        run: |
+          ./scripts/setup.sh --mode public --domain biga.example.com --yes
+          docker compose config --quiet
+          docker compose -f compose.yaml -f compose.ipv6.yaml config --quiet
+          docker compose -f compose.yaml -f compose.scale.yaml config --quiet
+          docker compose -f compose.yaml -f compose.ipv6.yaml -f compose.scale.yaml config --quiet
+
+      - name: Caddyfiles, every mode
+        run: |
+          for mode in public internal http; do
+            for domain in biga.example.com 192.0.2.10 '[2001:db8::10]'; do
+              docker run --rm -e BIGA_DOMAIN="$domain" -e BIGA_UPSTREAM_PROXIES=127.0.0.1/32 \
+                -v "$PWD/caddy:/etc/caddy:ro" caddy:2-alpine \
+                caddy validate --config "/etc/caddy/$mode.Caddyfile" --adapter caddyfile
+            done
+          done
+
+  smoke:
+    name: Smoke test (${{ matrix.overrides || 'default' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        overrides: ["", "-f compose.ipv6.yaml -f compose.scale.yaml"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: biga-sh/server
+          path: src/server
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: biga-sh/website
+          path: src/website
+          persist-credentials: false
+
+      - name: Start the stack
+        env:
+          OVERRIDES: ${{ matrix.overrides }}
+        run: |
+          ./scripts/setup.sh --mode http --domain localhost --http-port 8080 --yes
+          sed -i 's#^BIGA_PUBLIC_URL=.*#BIGA_PUBLIC_URL=http://localhost:8080#' .env
+          printf 'BIGA_SERVER_SOURCE=./src/server\nBIGA_WEB_SOURCE=./src/website\n' >> .env
+          # shellcheck disable=SC2086 # OVERRIDES is a list of flags
+          docker compose -f compose.yaml $OVERRIDES up -d --build --wait --wait-timeout 300
+
+      - name: Broadcast through it
+        run: |
+          set -eu
+          key=$(grep '^BIGA_ACCESS_KEYS=' .env | cut -d= -f2)
+          api=http://localhost:8080/api/sessions/smoke1
+          curl -fsS -o /dev/null http://localhost:8080/
+
+          # No key, no session.
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'Content-Type: application/json' -d '{}' "$api")" = 401
+
+          token=$(curl -fsS -X PUT -H 'Content-Type: application/json' -H "X-Biga-Key: $key" -d '{"title":"smoke"}' "$api" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["token"])')
+
+          # A key holder without the owner token cannot take it over.
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'Content-Type: application/json' -H "X-Biga-Key: $key" -d '{}' "$api")" = 401
+
+          hash=$(printf 'hello\n' | sha256sum | cut -d' ' -f1)
+          curl -fsS -o /dev/null -X POST -H 'Content-Type: application/json' -H "X-Biga-Key: $key" -H "Authorization: Bearer $token" \
+            -d "{\"sessionId\":\"smoke1\",\"timestamp\":1,\"sequenceNum\":0,\"tree\":{\"type\":\"directory\",\"name\":\"p\",\"path\":\".\",\"children\":[{\"type\":\"file\",\"name\":\"a.txt\",\"path\":\"a.txt\",\"size\":6,\"hash\":\"$hash\",\"content\":\"hello\\n\"}]}}" \
+            "$api/snapshot"
+
+          curl -fsS "$api/state" | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; assert d["contents"], d; print("state ok:", d["checkpoints"][0]["label"])'
+          curl -fsS -o /dev/null http://localhost:8080/session/smoke1
+
+      - name: Logs
+        if: failure()
+        run: docker compose logs
