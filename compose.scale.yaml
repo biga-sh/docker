@@ -1,0 +1,40 @@
+# Several API server instances behind Caddy, sharing live events and rate
+# limits through Valkey (a Redis-compatible store). Use with the main file:
+#
+#   docker compose -f compose.yaml -f compose.scale.yaml up -d
+#
+# One server handles thousands of viewers; reach for this for redundancy
+# during restarts or for very busy instances, not by default.
+services:
+  valkey:
+    restart: unless-stopped
+    image: valkey/valkey:8-alpine
+    command:
+      - valkey-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --requirepass
+      - ${VALKEY_PASSWORD:?run ./scripts/setup.sh}
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+    read_only: true
+    tmpfs: [/data]
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli -a \"$${VALKEY_PASSWORD}\" --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    environment:
+      VALKEY_PASSWORD: ${VALKEY_PASSWORD}
+    networks: [backend]
+
+  server:
+    environment:
+      REDIS_URL: redis://:${VALKEY_PASSWORD}@valkey:6379/0
+    deploy:
+      replicas: ${BIGA_SERVER_REPLICAS:-2}
+    depends_on:
+      valkey: { condition: service_healthy }

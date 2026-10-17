@@ -1,0 +1,24 @@
+# IPv6 at the edge. Use with the main file:
+#
+#   docker compose -f compose.yaml -f compose.ipv6.yaml up -d
+#
+# Adding it to (or removing it from) a running stack changes the network:
+# run `docker compose down` first (volumes are kept), or pass
+# --force-recreate. Containers Compose merely reattaches lose their service
+# names, and Caddy then cannot find the site.
+#
+# Docker already publishes ports on IPv6 ([::]:443), but on an IPv4-only
+# network it relays IPv6 connections through a userland proxy, so Caddy sees
+# every IPv6 visitor as the bridge gateway: one shared rate-limit budget and
+# useless logs. Enabling IPv6 on the edge network routes IPv6 natively and
+# keeps each visitor's real address.
+#
+# Needs Docker Engine 27 or newer on Linux, which assigns a unique local /64
+# on its own. On older engines set "ipv6": true and "ip6tables": true in
+# /etc/docker/daemon.json and give the network a subnet below.
+networks:
+  edge:
+    enable_ipv6: true
+    # ipam:
+    #   config:
+    #     - subnet: fd42:b16a::/64
